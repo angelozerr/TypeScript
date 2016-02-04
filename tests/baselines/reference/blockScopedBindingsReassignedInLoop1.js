@@ -12,12 +12,12 @@ declare function use(n: number): void;
     'use strict';
     var _loop_1 = function(i) {
         (function () { return use(++i); })();
-        _out_i_1 = i;
+        out_i_1 = i;
     };
-    var _out_i_1;
+    var out_i_1;
     for (var i = 0; i < 9; ++i) {
-        _out_i_1 = i;
+        out_i_1 = i;
         _loop_1(i);
-        i = _out_i_1;
+        i = out_i_1;
     }
 })();

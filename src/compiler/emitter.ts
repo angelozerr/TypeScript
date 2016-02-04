@@ -292,7 +292,45 @@ namespace ts {
         ToOutParameter
     }
 
-    interface ReassignedVariable {
+    /**
+     * If loop contains block scoped binding captured in some function then loop body is converted to a function.
+     * Lexical bindings declared in loop initializer will be passed into the loop body function as parameters,
+     * however if this binding is modified inside the body - this new value should be propagated back to the original binding.
+     * This is done by declaring new variable (out parameter holder) outside of the loop for every binding that is reassigned inside the body. 
+     * On every iteration this variable is initialized with value of corresponding binding.
+     * At every point where control flow leaves the loop either explicitly (break/continue) or implicitly (at the end of loop body)
+     * we copy the value inside the loop to the out parameter holder.
+     * 
+     * for (let x;;) {
+     *     let a = 1;
+     *     let b = () => a;
+     *     x++
+     *     if (...) break;
+     *     ...
+     * }
+     * 
+     * will be converted to
+     * 
+     * var out_x;
+     * var loop = function(x) {
+     *     var a = 1;
+     *     var b = function() { return a; }
+     *     x++;
+     *     if (...) return out_x = x, "break";
+     *     ...
+     *     out_x = x;
+     * }
+     * for (var x;;) {
+     *     out_x = x;
+     *     var state = loop(x);
+     *     x = out_x;
+     *     if (state === "break") break;
+     * }
+     * 
+     * NOTE: values to out parameters are not copies if loop is abrupted with 'return' - in this case this will end the entire enclosing function
+     * so nobody can observe this new value.
+     */
+    interface LoopOutParameter {
         originalName: Identifier;
         outParamName: string;
     }
@@ -429,7 +467,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
              * for (var x;;) loop(x);
              */
             hoistedLocalVariables?: Identifier[];
-            reassignedVariables?: ReassignedVariable[];
+
+            /**
+             * List of loop out parameters - detailed descripion can be found in the comment to LoopOutParameter
+             */
+            loopOutParameters?: LoopOutParameter[];
         }
 
         function setLabeledJump(state: ConvertedLoopState, isBreak: boolean, labelText: string, labelMarker: string): void {
@@ -2700,7 +2742,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     emitDestructuring(node, node.parent.kind === SyntaxKind.ExpressionStatement);
                 }
                 else {
-                    const exportChanged = isAssignmentOperator(node.operatorToken.kind) &&
+                    const exportChanged = 
+                        node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+                        node.operatorToken.kind <= SyntaxKind.LastAssignment &&
                         isNameOfExportedSourceLevelDeclarationInSystemExternalModule(node.left);
 
                     if (exportChanged) {
@@ -2961,7 +3005,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
             }
 
-             function convertLoopBody(node: IterationStatement): ConvertedLoop {
+            function convertLoopBody(node: IterationStatement): ConvertedLoop {
                 const functionName = makeUniqueName("_loop");
 
                 let loopInitializer: VariableDeclarationList;
@@ -2977,7 +3021,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
 
                 let loopParameters: string[];
-                let reassignedVariables: ReassignedVariable[];
+                let loopOutParameters: LoopOutParameter[];
                 if (loopInitializer && (getCombinedNodeFlags(loopInitializer) & NodeFlags.BlockScoped)) {
                     // if loop initializer contains block scoped variables - they should be passed to converted loop body as parameters
                     loopParameters = [];
@@ -2993,7 +3037,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 write(`var ${functionName} = function(${paramList})`);
 
                 const convertedOuterLoopState = convertedLoopState;
-                convertedLoopState = { reassignedVariables };
+                convertedLoopState = { loopOutParameters };
 
                 if (convertedOuterLoopState) {
                     // convertedOuterLoopState !== undefined means that this converted loop is nested in another converted loop.
@@ -3029,21 +3073,21 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
 
                 writeLine();
-                copyReassignedVariablesIfNecessary(convertedLoopState, CopyDirection.ToOutParameter, ";");
+                copyLoopOutParameters(convertedLoopState, CopyDirection.ToOutParameter, /*emitAsStatements*/true);
 
                 decreaseIndent();
                 writeLine();
                 write("};");
                 writeLine();
 
-                if (reassignedVariables) {
+                if (loopOutParameters) {
                     // declare variables to hold out params for loop body
                     write(`var `);
-                    for (let i = 0; i < reassignedVariables.length; i++) {
+                    for (let i = 0; i < loopOutParameters.length; i++) {
                         if (i !== 0) {
                             write(", ");
                         }
-                        write(reassignedVariables[i].outParamName);
+                        write(loopOutParameters[i].outParamName);
                     }
                     write(";");
                     writeLine();
@@ -3118,9 +3162,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                             : (<Identifier>name).text;
 
                         loopParameters.push(nameText);
-                        if (resolver.getNodeCheckFlags(name.parent) & NodeCheckFlags.ReassignedInsideLoop) {
-                            const reassignedVariable = { originalName: <Identifier>name, outParamName: makeUniqueName(`_out_${nameText}`) };
-                            (reassignedVariables || (reassignedVariables = [])).push(reassignedVariable);
+                        if (resolver.getNodeCheckFlags(name.parent) & NodeCheckFlags.NeedsLoopOutParameter) {
+                            const reassignedVariable = { originalName: <Identifier>name, outParamName: makeUniqueName(`out_${nameText}`) };
+                            (loopOutParameters || (loopOutParameters = [])).push(reassignedVariable);
                         }
                     }
                     else {
@@ -3156,23 +3200,25 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
             }
 
-            function copyReassignedVariablesIfNecessary(state: ConvertedLoopState, copyDirection: CopyDirection, suffix: string) {
-                if (state.reassignedVariables) {
-                    for (let i = 0; i < state.reassignedVariables.length; i++) {
-                        const v = state.reassignedVariables[i];
-                        if (i !== 0) {
-                            write(", ");
-                        }
+            function copyLoopOutParameters(state: ConvertedLoopState, copyDirection: CopyDirection, emitAsStatements: boolean) {
+                if (state.loopOutParameters) {
+                    for (const outParam of state.loopOutParameters) {
                         if (copyDirection === CopyDirection.ToOriginal) {
-                            emitIdentifier(v.originalName);
-                            write(` = ${v.outParamName}`);
+                            emitIdentifier(outParam.originalName);
+                            write(` = ${outParam.outParamName}`);
                         }
                         else {
-                            write(`${v.outParamName} = `);
-                            emitIdentifier(v.originalName);
+                            write(`${outParam.outParamName} = `);
+                            emitIdentifier(outParam.originalName);
+                        }
+                        if (emitAsStatements) {
+                            write(";")
+                            writeLine();
+                        }
+                        else {
+                            write(", ");
                         }
                     }
-                    write(suffix);
                 }
             }
 
@@ -3190,7 +3236,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     !loop.state.labeledNonLocalBreaks &&
                     !loop.state.labeledNonLocalContinues;
 
-                copyReassignedVariablesIfNecessary(loop.state, CopyDirection.ToOutParameter, ";");
+                copyLoopOutParameters(loop.state, CopyDirection.ToOutParameter, /*emitAsStatements*/ true);
                 writeLine();
 
                 const loopResult = makeUniqueName("state");
@@ -3201,7 +3247,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 write(`${loop.functionName}(${loop.paramList});`);
                 writeLine();
 
-                copyReassignedVariablesIfNecessary(loop.state, CopyDirection.ToOriginal, ";");
+                copyLoopOutParameters(loop.state, CopyDirection.ToOriginal, /*emitAsStatements*/ true);
 
                 if (!isSimpleLoop) {
                     // for non simple loops we need to store result returned from converted loop function and use it to do dispatching
@@ -3522,7 +3568,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 
                     if (!canUseBreakOrContinue) {
                         write ("return ");
-                        copyReassignedVariablesIfNecessary(convertedLoopState, CopyDirection.ToOutParameter, ", ");
+                        copyLoopOutParameters(convertedLoopState, CopyDirection.ToOutParameter, /*emitAsStatements*/ false);
                         if (!node.label) {
                             if (node.kind === SyntaxKind.BreakStatement) {
                                 convertedLoopState.nonLocalJumps |= Jump.Break;

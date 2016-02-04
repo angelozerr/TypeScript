@@ -7266,11 +7266,11 @@ namespace ts {
                 }
 
                 // mark variables that are declared in loop initializer and reassigned inside the body of ForStatement.
-                // if body of ForStatement will be converted to function then we'll need a extra machinery to copy reassigned values back.
+                // if body of ForStatement will be converted to function then we'll need a extra machinery to propagate reassigned values back.
                 if (container.kind === SyntaxKind.ForStatement &&
                     getAncestor(symbol.valueDeclaration, SyntaxKind.VariableDeclarationList).parent === container &&
                     isAssignedInBodyOfForStatement(node, <ForStatement>container)) {
-                    getNodeLinks(symbol.valueDeclaration).flags |= NodeCheckFlags.ReassignedInsideLoop;
+                    getNodeLinks(symbol.valueDeclaration).flags |= NodeCheckFlags.NeedsLoopOutParameter;
                 }
 
                 // set 'declared inside loop' bit on the block-scoped binding
@@ -7284,6 +7284,7 @@ namespace ts {
 
         function isAssignedInBodyOfForStatement(node: Identifier, container: ForStatement): boolean {
             let current: Node = node;
+            // skip parenthesized nodes
             while (current.parent.kind === SyntaxKind.ParenthesizedExpression) {
                 current = current.parent;
             }
@@ -7303,16 +7304,17 @@ namespace ts {
                 return false;
             }
 
+            // at this point we know that node is the target of assignment
+            // now check that modification happens inside the statement part of the ForStatement
             while (current !== container) {
-                if (current === container.incrementor) {
-                    return false;
+                if (current === container.statement) {
+                    return true;
                 }
                 else {
                     current = current.parent;
                 }
             }
-
-            return true;
+            return false;
         }
 
         function captureLexicalThis(node: Node, container: Node): void {

@@ -123,13 +123,13 @@ function a4() {
     var _loop_5 = function(x) {
         x = x + 1;
         (function () { return x; });
-        _out_x_1 = x;
+        out_x_1 = x;
     };
-    var _out_x_1;
+    var out_x_1;
     for (var x = void 0; x < 1;) {
-        _out_x_1 = x;
+        out_x_1 = x;
         _loop_5(x);
-        x = _out_x_1;
+        x = out_x_1;
     }
     switch (1) {
         case 1:
@@ -141,13 +141,13 @@ function a5() {
     var _loop_6 = function(x) {
         x = x + 1;
         (function () { return x; });
-        _out_x_2 = x;
+        out_x_2 = x;
     };
-    var _out_x_2;
+    var out_x_2;
     for (var x = void 0; x < 1;) {
-        _out_x_2 = x;
+        out_x_2 = x;
         _loop_6(x);
-        x = _out_x_2;
+        x = out_x_2;
     }
     switch (1) {
         case 1:

@@ -119,9 +119,13 @@ function a2() {
     var _loop_2 = function(x) {
         x = x + 2;
         (function () { return x; });
+        _out_x_1 = x;
     };
+    var _out_x_1;
     for (var x = void 0;;) {
+        _out_x_1 = x;
         _loop_2(x);
+        x = _out_x_1;
     }
 }
 function a3() {
@@ -136,9 +140,13 @@ function a3() {
     var _loop_4 = function(x) {
         x = x + 2;
         (function () { return x; });
+        _out_x_2 = x;
     };
+    var _out_x_2;
     for (var x = void 0;;) {
+        _out_x_2 = x;
         _loop_4(x);
+        x = _out_x_2;
     }
 }
 function a4() {

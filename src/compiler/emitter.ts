@@ -287,6 +287,16 @@ namespace ts {
         _i        = 0x10000000,  // Use/preference flag for '_i'
     }
 
+    const enum CopyDirection {
+        ToOriginal,
+        ToOutParameter
+    }
+
+    interface ReassignedVariable {
+        originalName: Identifier;
+        outParamName: string;
+    }
+
     // targetSourceFile is when users only want one file in entire project to be emitted. This is used in compileOnSave feature
     export function emitFiles(resolver: EmitResolver, host: EmitHost, targetSourceFile: SourceFile): EmitResult {
         // emit output for the __extends helper function
@@ -419,6 +429,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
              * for (var x;;) loop(x);
              */
             hoistedLocalVariables?: Identifier[];
+            reassignedVariables?: ReassignedVariable[];
         }
 
         function setLabeledJump(state: ConvertedLoopState, isBreak: boolean, labelText: string, labelMarker: string): void {
@@ -2689,9 +2700,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     emitDestructuring(node, node.parent.kind === SyntaxKind.ExpressionStatement);
                 }
                 else {
-                    const exportChanged =
-                        node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
-                        node.operatorToken.kind <= SyntaxKind.LastAssignment &&
+                    const exportChanged = isAssignmentOperator(node.operatorToken.kind) &&
                         isNameOfExportedSourceLevelDeclarationInSystemExternalModule(node.left);
 
                     if (exportChanged) {
@@ -2952,7 +2961,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
             }
 
-            function convertLoopBody(node: IterationStatement): ConvertedLoop {
+             function convertLoopBody(node: IterationStatement): ConvertedLoop {
                 const functionName = makeUniqueName("_loop");
 
                 let loopInitializer: VariableDeclarationList;
@@ -2968,11 +2977,12 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
 
                 let loopParameters: string[];
+                let reassignedVariables: ReassignedVariable[];
                 if (loopInitializer && (getCombinedNodeFlags(loopInitializer) & NodeFlags.BlockScoped)) {
                     // if loop initializer contains block scoped variables - they should be passed to converted loop body as parameters
                     loopParameters = [];
                     for (const varDeclaration of loopInitializer.declarations) {
-                        collectNames(varDeclaration.name);
+                        processVariableDeclaration(varDeclaration.name);
                     }
                 }
 
@@ -2982,14 +2992,8 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 writeLine();
                 write(`var ${functionName} = function(${paramList})`);
 
-                if (!bodyIsBlock) {
-                    write(" {");
-                    writeLine();
-                    increaseIndent();
-                }
-
                 const convertedOuterLoopState = convertedLoopState;
-                convertedLoopState = {};
+                convertedLoopState = { reassignedVariables };
 
                 if (convertedOuterLoopState) {
                     // convertedOuterLoopState !== undefined means that this converted loop is nested in another converted loop.
@@ -3013,16 +3017,37 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     }
                 }
 
-                emitEmbeddedStatement(node.statement);
+                write(" {");
+                writeLine();
+                increaseIndent();
 
-                if (!bodyIsBlock) {
-                    decreaseIndent();
-                    writeLine();
-                    write("}");
+                if (bodyIsBlock) {
+                    emitLines((<Block>node.statement).statements);
                 }
-                write(";");
+                else {
+                    emit(node.statement);
+                }
+
+                writeLine();
+                copyReassignedVariablesIfNecessary(convertedLoopState, CopyDirection.ToOutParameter, ";");
+
+                decreaseIndent();
+                writeLine();
+                write("};");
                 writeLine();
 
+                if (reassignedVariables) {
+                    // declare variables to hold out params for loop body
+                    write(`var `);
+                    for (let i = 0; i < reassignedVariables.length; i++) {
+                        if (i !== 0) {
+                            write(", ");
+                        }
+                        write(reassignedVariables[i].outParamName);
+                    }
+                    write(";");
+                    writeLine();
+                }
                 if (convertedLoopState.argumentsName) {
                     // if alias for arguments is set
                     if (convertedOuterLoopState) {
@@ -3086,14 +3111,21 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 
                 return { functionName, paramList, state: currentLoopState };
 
-                function collectNames(name: Identifier | BindingPattern): void {
+                function processVariableDeclaration(name: Identifier | BindingPattern): void {
                     if (name.kind === SyntaxKind.Identifier) {
-                        const nameText = isNameOfNestedBlockScopedRedeclarationOrCapturedBinding(<Identifier>name) ? getGeneratedNameForNode(name) : (<Identifier>name).text;
+                        const nameText = isNameOfNestedBlockScopedRedeclarationOrCapturedBinding(<Identifier>name)
+                            ? getGeneratedNameForNode(name)
+                            : (<Identifier>name).text;
+
                         loopParameters.push(nameText);
+                        if (resolver.getNodeCheckFlags(name.parent) & NodeCheckFlags.ReassignedInsideLoop) {
+                            const reassignedVariable = { originalName: <Identifier>name, outParamName: makeUniqueName(`_out_${nameText}`) };
+                            (reassignedVariables || (reassignedVariables = [])).push(reassignedVariable);
+                        }
                     }
                     else {
                         for (const element of (<BindingPattern>name).elements) {
-                            collectNames(element.name);
+                            processVariableDeclaration(element.name);
                         }
                     }
                 }
@@ -3124,6 +3156,26 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
             }
 
+            function copyReassignedVariablesIfNecessary(state: ConvertedLoopState, copyDirection: CopyDirection, suffix: string) {
+                if (state.reassignedVariables) {
+                    for (let i = 0; i < state.reassignedVariables.length; i++) {
+                        const v = state.reassignedVariables[i];
+                        if (i !== 0) {
+                            write(", ");
+                        }
+                        if (copyDirection === CopyDirection.ToOriginal) {
+                            emitIdentifier(v.originalName);
+                            write(` = ${v.outParamName}`);
+                        }
+                        else {
+                            write(`${v.outParamName} = `);
+                            emitIdentifier(v.originalName);
+                        }
+                    }
+                    write(suffix);
+                }
+            }
+
             function emitConvertedLoopCall(loop: ConvertedLoop, emitAsBlock: boolean): void {
                 if (emitAsBlock) {
                     write(" {");
@@ -3138,12 +3190,18 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     !loop.state.labeledNonLocalBreaks &&
                     !loop.state.labeledNonLocalContinues;
 
+                copyReassignedVariablesIfNecessary(loop.state, CopyDirection.ToOutParameter, ";");
+                writeLine();
+
                 const loopResult = makeUniqueName("state");
                 if (!isSimpleLoop) {
                     write(`var ${loopResult} = `);
                 }
 
                 write(`${loop.functionName}(${loop.paramList});`);
+                writeLine();
+
+                copyReassignedVariablesIfNecessary(loop.state, CopyDirection.ToOriginal, ";");
 
                 if (!isSimpleLoop) {
                     // for non simple loops we need to store result returned from converted loop function and use it to do dispatching
@@ -3463,14 +3521,16 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                         (!node.label && (convertedLoopState.allowedNonLabeledJumps & jump));
 
                     if (!canUseBreakOrContinue) {
+                        write ("return ");
+                        copyReassignedVariablesIfNecessary(convertedLoopState, CopyDirection.ToOutParameter, ", ");
                         if (!node.label) {
                             if (node.kind === SyntaxKind.BreakStatement) {
                                 convertedLoopState.nonLocalJumps |= Jump.Break;
-                                write(`return "break";`);
+                                write(`"break";`);
                             }
                             else {
                                 convertedLoopState.nonLocalJumps |= Jump.Continue;
-                                write(`return "continue";`);
+                                write(`"continue";`);
                             }
                         }
                         else {
@@ -3483,7 +3543,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                                 labelMarker = `continue-${node.label.text}`;
                                 setLabeledJump(convertedLoopState, /*isBreak*/ false, node.label.text, labelMarker);
                             }
-                            write(`return "${labelMarker}";`);
+                            write(`"${labelMarker}";`);
                         }
 
                         return;

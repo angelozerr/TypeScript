@@ -2742,7 +2742,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     emitDestructuring(node, node.parent.kind === SyntaxKind.ExpressionStatement);
                 }
                 else {
-                    const exportChanged = 
+                    const exportChanged =
                         node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
                         node.operatorToken.kind <= SyntaxKind.LastAssignment &&
                         isNameOfExportedSourceLevelDeclarationInSystemExternalModule(node.left);
@@ -3212,7 +3212,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                             emitIdentifier(outParam.originalName);
                         }
                         if (emitAsStatements) {
-                            write(";")
+                            write(";");
                             writeLine();
                         }
                         else {

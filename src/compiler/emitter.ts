@@ -3073,6 +3073,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 }
 
                 writeLine();
+                // end of loop body -> copy out parameter 
                 copyLoopOutParameters(convertedLoopState, CopyDirection.ToOutParameter, /*emitAsStatements*/true);
 
                 decreaseIndent();
@@ -3568,6 +3569,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 
                     if (!canUseBreakOrContinue) {
                         write ("return ");
+                        // explicit exit from loop -> copy out parameters
                         copyLoopOutParameters(convertedLoopState, CopyDirection.ToOutParameter, /*emitAsStatements*/ false);
                         if (!node.label) {
                             if (node.kind === SyntaxKind.BreakStatement) {
